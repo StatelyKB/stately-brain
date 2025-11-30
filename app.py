@@ -32,6 +32,7 @@ def embed(texts: List[str]) -> List[List[float]]:
 
 
 # ---------- LanceDB (explicit schema) ----------
+# On Render this points at your persistent disk
 DB_PATH = "/data/stately_lancedb"
 TABLE = "stately_brain"
 
@@ -77,8 +78,10 @@ def open_or_create_table():
 
 t = open_or_create_table()
 
-# ---------- FastAPI app + CORS ----------
+# ---------- FastAPI app ----------
 app = FastAPI()
+
+# ---------- Slack endpoints ----------
 @app.post("/slack/command")
 async def slack_command(request: Request):
     # Slack sends form-encoded data for slash commands
@@ -92,6 +95,7 @@ async def slack_command(request: Request):
         "response_type": "ephemeral",  # only visible to the user who ran the command
         "text": f"Stately Brain heard: `{text}` (from <@{user_id}>)"
     }
+
 
 @app.post("/slack/events")
 async def slack_events(request: Request):
@@ -107,7 +111,8 @@ async def slack_events(request: Request):
     # For now we just acknowledge so Slack is happy
     return {"ok": True}
 
-# ONLY ONE CORS BLOCK
+
+# ---------- CORS ----------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # allow everything during development
@@ -165,6 +170,7 @@ def ingest(req: IngestReq):
         print("INGEST ERROR:", repr(e))
         return {"error": str(e)}
 
+
 # ---------- helper: build full text context from hits ----------
 def build_context(hits: List[dict]) -> str:
     """Turn LanceDB hits into a single context string for the LLM."""
@@ -175,6 +181,7 @@ def build_context(hits: List[dict]) -> str:
         text = h.get("text", "")
         parts.append(f"[{i}] Project: {proj} | Source: {src}\n{text}")
     return "\n\n---\n\n".join(parts)
+
 
 # ---------- /ask ----------
 @app.post("/ask")
@@ -235,6 +242,8 @@ If you are not sure, say you are not sure.
     except Exception as e:
         print("ASK ERROR:", repr(e))
         return {"error": str(e)}
+
+
 # ---------- /projects ----------
 @app.get("/projects")
 def list_projects():
@@ -243,13 +252,11 @@ def list_projects():
     Used by chat.html to populate the project dropdown.
     """
     try:
-        # Pull the whole table into a DataFrame
         df = t.to_pandas()
 
         if df.empty or "project" not in df.columns:
             return {"projects": []}
 
-        # Clean and deduplicate project names
         raw_projects = df["project"].fillna("General").tolist()
         projects = sorted({p.strip() for p in raw_projects if p and p.strip()})
 
@@ -257,15 +264,24 @@ def list_projects():
     except Exception as e:
         print("PROJECTS ERROR:", repr(e))
         return {"error": str(e), "projects": []}
- # ---------- helper: split large text into chunks ----------
-def chunk_text(text: str, max_chars: int = 20000) -> List[str]:
+
+
+# ---------- helper: split large text into chunks ----------
+def chunk_text(text: str, max_chars: int = 6000) -> List[str]:
     """
     Split a long string into chunks of at most max_chars characters.
-    We use this so embeddings never exceed the OpenAI token limit.
+
+    We use characters as a rough proxy for tokens. 6,000 characters keeps us
+    safely under the ~8,192 token limit of text-embedding-3-small even for
+    messy text.
     """
     text = text or ""
-    return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]       
-# ---------- /memory/upload ----------
+    if not text:
+        return []
+    return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+
+
+# ---------- helper: read text from a single uploaded file ----------
 def _read_text_from_upload(filename: str, data: bytes) -> str:
     name = (filename or "").lower()
     # Simple heuristics by extension
@@ -289,6 +305,7 @@ def _read_text_from_upload(filename: str, data: bytes) -> str:
             return ""
 
 
+# ---------- /memory/upload (single or multiple files) ----------
 @app.post("/memory/upload")
 async def memory_upload(
     files: List[UploadFile] = File(
@@ -311,26 +328,31 @@ async def memory_upload(
             text = _read_text_from_upload(f.filename, raw)
             if not text:
                 continue
-            vec = embed([text])[0]
-            row = {
-                "id": str(uuid.uuid4()),
-                "text": text,
-                "project": proj,
-                "source": f.filename or "(upload)",
-                "tags": tag_list,
-                "vector": vec,
-            }
-            t.add([row])
-            saved.append({"id": row["id"], "source": row["source"]})
+
+            # Chunk the text so we don't exceed the embedding model's context
+            for part in chunk_text(text):
+                if not part.strip():
+                    continue
+
+                vec = embed([part])[0]
+                row = {
+                    "id": str(uuid.uuid4()),
+                    "text": part,
+                    "project": proj,
+                    "source": f.filename or "(upload)",
+                    "tags": tag_list,
+                    "vector": vec,
+                }
+                t.add([row])
+                saved.append({"id": row["id"], "source": row["source"]})
+
         return {"ok": True, "count": len(saved), "saved": saved}
     except Exception as e:
         print("UPLOAD ERROR:", repr(e))
         return {"error": str(e)}
-        import zipfile
-import tempfile
-import shutil
-import os
 
+
+# ---------- /memory/upload-folder (ZIP of a customer folder) ----------
 @app.post("/memory/upload-folder")
 async def memory_upload_folder(
     zip_file: UploadFile = File(
@@ -348,7 +370,6 @@ async def memory_upload_folder(
     Large files are chunked so we never exceed OpenAI token limits.
     """
     import io
-    import zipfile
 
     saved = []
     raw_zip = await zip_file.read()
@@ -374,8 +395,8 @@ async def memory_upload_folder(
                 if not text:
                     continue
 
-                # CHUNK THE TEXT SO WE DON'T HIT THE TOKEN LIMIT
-                for part in chunk_text(text, max_chars=20000):
+                # Chunk the text so we don't hit the token limit
+                for part in chunk_text(text):
                     if not part.strip():
                         continue
 
