@@ -11,7 +11,7 @@ from typing import List, Optional
 
 import pyarrow as pa
 import lancedb
-from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi import FastAPI, UploadFile, File, Form, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -417,3 +417,31 @@ async def memory_upload_folder(
     except Exception as e:
         print("UPLOAD-FOLDER ERROR:", repr(e))
         return {"error": str(e)}
+
+
+# ---------- /memory/reset-project (delete all rows for a project) ----------
+@app.delete("/memory/reset-project")
+def reset_project(
+    project: str = Query(
+        ...,
+        description="Exact project name to wipe, e.g., 'Casterline David'",
+    )
+):
+    """
+    Delete all memory rows for a single project.
+
+    Call:
+      DELETE /memory/reset-project?project=Casterline%20David
+    """
+    try:
+        # Escape single-quotes in the project name for the where clause
+        safe_project = project.replace("'", "''")
+        where_expr = f"project = '{safe_project}'"
+
+        # LanceDB delete by filter expression
+        t.delete(where=where_expr)
+
+        return {"ok": True, "project": project}
+    except Exception as e:
+        print("RESET-PROJECT ERROR:", repr(e))
+        return {"error": str(e), "project": project}
