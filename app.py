@@ -31,7 +31,7 @@ def embed(texts: List[str]) -> List[List[float]]:
 
 
 # ---------- LanceDB (explicit schema) ----------
-DB_PATH = "stately_lancedb"
+DB_PATH = os.getenv("DB_PATH", "stately_lancedb")
 TABLE = "stately_brain"
 
 db = lancedb.connect(DB_PATH)
