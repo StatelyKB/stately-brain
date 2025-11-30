@@ -257,6 +257,14 @@ def list_projects():
     except Exception as e:
         print("PROJECTS ERROR:", repr(e))
         return {"error": str(e), "projects": []}
+ # ---------- helper: split large text into chunks ----------
+def chunk_text(text: str, max_chars: int = 20000) -> List[str]:
+    """
+    Split a long string into chunks of at most max_chars characters.
+    We use this so embeddings never exceed the OpenAI token limit.
+    """
+    text = text or ""
+    return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]       
 # ---------- /memory/upload ----------
 def _read_text_from_upload(filename: str, data: bytes) -> str:
     name = (filename or "").lower()
@@ -325,69 +333,65 @@ import os
 
 @app.post("/memory/upload-folder")
 async def memory_upload_folder(
-    zip_file: UploadFile = File(..., description="A ZIP file containing a full customer folder"),
-    project: Optional[str] = Form(None, description="Project name override. Defaults to ZIP top folder name."),
-    tags: Optional[str] = Form(None, description="Comma-separated tags")
+    zip_file: UploadFile = File(
+        ..., description="A .zip containing .txt/.md/.pdf files (customer folder export)"
+    ),
+    project: Optional[str] = Form(
+        None, description='Project name, e.g., "Casterline David" (defaults to zip name)'
+    ),
+    tags: Optional[str] = Form(
+        None, description='Comma-separated tags, e.g., "2026, customers"'
+    ),
 ):
+    """
+    Upload a ZIP of customer files, unzip server-side, and ingest each file.
+    Large files are chunked so we never exceed OpenAI token limits.
+    """
+    import io
+    import zipfile
+
+    saved = []
+    raw_zip = await zip_file.read()
+
+    # Base project name: explicit project override, else zip filename without .zip
+    proj = project or (zip_file.filename or "General").replace(".zip", "")
+    tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()] or []
+
     try:
-        # Create temp folder
-        temp_dir = tempfile.mkdtemp()
-
-        # Save uploaded zip temporarily
-        zip_path = os.path.join(temp_dir, "upload.zip")
-        with open(zip_path, "wb") as f:
-            f.write(await zip_file.read())
-
-        # Extract ZIP content
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(temp_dir)
-
-        # Determine project name
-        root_items = [p for p in os.listdir(temp_dir) if p != "upload.zip"]
-        top_folder = root_items[0] if root_items else "General"
-        project_name = project or top_folder
-        tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()] or []
-
-        saved = []
-
-        # Walk all files
-        for root, dirs, files in os.walk(temp_dir):
-            for fname in files:
-                full_path = os.path.join(root, fname)
-
-                # Skip internal temp ZIP
-                if fname == "upload.zip":
+        with zipfile.ZipFile(io.BytesIO(raw_zip)) as z:
+            for info in z.infolist():
+                # Skip directories
+                if info.is_dir():
                     continue
 
-                # Load file
-                try:
-                    with open(full_path, "rb") as f:
-                        data = f.read()
-                except:
+                fname = info.filename
+                # Optional: ignore hidden/system files
+                if fname.startswith("__MACOSX") or fname.endswith(".DS_Store"):
                     continue
 
-                # Extract text
+                data = z.read(info)
                 text = _read_text_from_upload(fname, data)
                 if not text:
                     continue
 
-                # Embed and save
-                vec = embed([text])[0]
-                row = {
-                    "id": str(uuid.uuid4()),
-                    "text": text,
-                    "project": project_name,
-                    "source": fname,
-                    "tags": tag_list,
-                    "vector": vec,
-                }
-                t.add([row])
-                saved.append({"id": row["id"], "source": fname})
+                # CHUNK THE TEXT SO WE DON'T HIT THE TOKEN LIMIT
+                for part in chunk_text(text, max_chars=20000):
+                    if not part.strip():
+                        continue
 
-        # Clean up temp folder
-        shutil.rmtree(temp_dir, ignore_errors=True)
+                    vec = embed([part])[0]
+                    row = {
+                        "id": str(uuid.uuid4()),
+                        "text": part,
+                        "project": proj,
+                        "source": fname,
+                        "tags": tag_list,
+                        "vector": vec,
+                    }
+                    t.add([row])
+                    saved.append({"id": row["id"], "source": row["source"]})
 
-        return {"ok": True, "count": len(saved), "saved": saved, "project": project_name}
+        return {"ok": True, "count": len(saved), "saved": saved}
 
     except Exception as e:
         print("UPLOAD-FOLDER ERROR:", repr(e))
