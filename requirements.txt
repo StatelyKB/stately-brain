@@ -6,3 +6,4 @@ pyarrow
 pypdf
 openai
 python-multipart
+pandas
