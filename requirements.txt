@@ -7,3 +7,4 @@ pypdf
 openai
 python-multipart
 pandas
+httpx
