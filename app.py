@@ -84,16 +84,49 @@ app = FastAPI()
 # ---------- Slack endpoints ----------
 @app.post("/slack/command")
 async def slack_command(request: Request):
-    # Slack sends form-encoded data for slash commands
+    """
+    Handle the /brain slash command from Slack.
+
+    Flow:
+    - Read the text the user typed after /brain
+    - Call the existing /ask logic in this file
+    - Return the answer back to Slack as an ephemeral message
+    """
     form = await request.form()
 
-    text = form.get("text", "")
-    user_id = form.get("user_id", "")
+    text = (form.get("text") or "").strip()
+    user_id = form.get("user_id") or ""
 
-    # For now, just echo back what Slack sent so we know it's wired correctly
+    if not text:
+        return {
+            "response_type": "ephemeral",
+            "text": "Use `/brain` followed by a question, e.g. `/brain summarize the latest client notes`.",
+        }
+
+    # Reuse the existing /ask logic directly
+    try:
+        req = AskReq(question=text, project=None, k=6)
+        result = ask(req)
+    except Exception as e:
+        return {
+            "response_type": "ephemeral",
+            "text": f"Stately Brain error while processing your question: {e}",
+        }
+
+    # ask() returns {"answer_draft": ..., "citations": [...] } on success
+    if isinstance(result, dict) and "error" in result:
+        msg = f"Stately Brain error: {result.get('error')}"
+    else:
+        msg = (
+            result.get("answer_draft")
+            if isinstance(result, dict)
+            else str(result)
+        )
+
+    # Only visible to the user who ran the command
     return {
-        "response_type": "ephemeral",  # only visible to the user who ran the command
-        "text": f"Stately Brain heard: `{text}` (from <@{user_id}>)"
+        "response_type": "ephemeral",
+        "text": msg or "I didn't get a usable answer back from Stately Brain.",
     }
 
 
@@ -107,7 +140,7 @@ async def slack_events(request: Request):
         challenge = payload.get("challenge")
         return {"challenge": challenge}
 
-    # 2) Handle normal events later (mentions, etc.)
+    # 2) Normal events (mentions, DMs, etc.) can be handled later
     # For now we just acknowledge so Slack is happy
     return {"ok": True}
 
@@ -204,7 +237,7 @@ def ask(req: AskReq):
             if not hits:
                 return {
                     "answer_draft": "I couldn't find anything matching that question.",
-                    "citations": []
+                    "citations": [],
                 }
 
         # 3) build context text from hits
@@ -278,7 +311,7 @@ def chunk_text(text: str, max_chars: int = 6000) -> List[str]:
     text = text or ""
     if not text:
         return []
-    return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+    return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
 
 
 # ---------- helper: read text from a single uploaded file ----------
