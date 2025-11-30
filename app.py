@@ -1,4 +1,5 @@
 import os
+import zipfile
 from dotenv import load_dotenv
 
 # ---------- Load .env ----------
