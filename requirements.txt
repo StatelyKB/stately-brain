@@ -5,3 +5,4 @@ lancedb
 pyarrow
 pypdf
 openai
+python-multipart
