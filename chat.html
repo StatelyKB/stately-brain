@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Stately Brain</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      background: #020617;
+      color: #e5e7eb;
+    }
+
+    .page {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    .header {
+      margin-bottom: 12px;
+    }
+
+    .title {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      color: #9ca3af;
+    }
+
+    .controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin: 12px 0 8px;
+      padding: 8px;
+      border-radius: 999px;
+      background: #020617;
+      border: 1px solid #1f2937;
+    }
+
+    .controls label {
+      font-size: 13px;
+      color: #9ca3af;
+      white-space: nowrap;
+      margin-left: 8px;
+    }
+
+    select {
+      flex: 1;
+      background: #020617;
+      border-radius: 999px;
+      border: 1px solid #374151;
+      color: #e5e7eb;
+      padding: 6px 10px;
+      font-size: 13px;
+      outline: none;
+    }
+
+    select:focus {
+      border-color: #4b8bf4;
+    }
+
+    .status {
+      font-size: 12px;
+      color: #9ca3af;
+      margin-top: 2px;
+      margin-left: 16px;
+    }
+
+    .chat-box {
+      flex: 1;
+      background: radial-gradient(circle at top, #111827 0, #020617 55%);
+      border-radius: 24px;
+      border: 1px solid #1f2937;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .chat-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+
+    .bubble-row {
+      display: flex;
+      margin: 6px 0;
+    }
+
+    .bubble-row.user {
+      justify-content: flex-end;
+    }
+
+    .bubble-row.bot {
+      justify-content: flex-start;
+    }
+
+    .bubble {
+      max-width: 80%;
+      padding: 8px 12px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .bubble.user {
+      background: #2563eb;
+      color: #f9fafb;
+      border-bottom-right-radius: 4px;
+    }
+
+    .bubble.bot {
+      background: #111827;
+      color: #e5e7eb;
+      border-bottom-left-radius: 4px;
+      border: 1px solid #1f2937;
+    }
+
+    .citations {
+      font-size: 11px;
+      color: #9ca3af;
+      margin-top: 4px;
+    }
+
+    .input-row {
+      display: flex;
+      margin-top: 10px;
+      padding: 8px;
+      border-radius: 999px;
+      background: #020617;
+      border: 1px solid #1f2937;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .input-row input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: #e5e7eb;
+      font-size: 14px;
+      outline: none;
+    }
+
+    .input-row input::placeholder {
+      color: #6b7280;
+    }
+
+    .send-btn {
+      border: none;
+      border-radius: 999px;
+      padding: 8px 18px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      background: #2563eb;
+      color: white;
+      transition: background 0.15s ease;
+    }
+
+    .send-btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    .send-btn:not(:disabled):hover {
+      background: #1d4ed8;
+    }
+
+    .small-note {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 6px;
+      margin-left: 4px;
+    }
+
+    @media (max-width: 640px) {
+      .page {
+        padding: 8px;
+      }
+      .chat-box {
+        border-radius: 16px;
+      }
+      .bubble {
+        max-width: 92%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div class="title">Stately Brain</div>
+      <div class="subtitle">Ask questions against your local project memory.</div>
+    </div>
+
+    <div class="controls">
+      <label for="projectSelect">Project</label>
+      <select id="projectSelect">
+        <option value="">Loading projects…</option>
+      </select>
+    </div>
+    <div class="status" id="projectStatus"></div>
+
+    <div class="chat-box">
+      <div class="chat-scroll" id="chatScroll"></div>
+      <form class="input-row" id="chatForm">
+        <input
+          id="questionInput"
+          type="text"
+          placeholder='Ask a question about your project…'
+          autocomplete="off"
+        />
+        <button type="submit" class="send-btn" id="sendBtn">Send</button>
+      </form>
+    </div>
+    <div class="small-note">
+      Your data stays local on this machine. Make sure the FastAPI backend (port 8000) is running.
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = "http://127.0.0.1:8000";
+
+    const projectSelect = document.getElementById("projectSelect");
+    const projectStatus = document.getElementById("projectStatus");
+    const chatScroll = document.getElementById("chatScroll");
+    const chatForm = document.getElementById("chatForm");
+    const questionInput = document.getElementById("questionInput");
+    const sendBtn = document.getElementById("sendBtn");
+
+    let currentProject = null;
+    let loadingProjects = false;
+
+    function appendMessage(text, sender, citations) {
+      const row = document.createElement("div");
+      row.className = "bubble-row " + (sender === "user" ? "user" : "bot");
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble " + (sender === "user" ? "user" : "bot");
+      bubble.textContent = text;
+
+      row.appendChild(bubble);
+
+      if (sender === "bot" && citations && citations.length) {
+        const cit = document.createElement("div");
+        cit.className = "citations";
+        const first = citations[0];
+        const src = first.source || "unknown";
+        const proj = first.project || "";
+        cit.textContent = `Source: ${proj ? proj + " · " : ""}${src}`;
+        row.appendChild(cit);
+      }
+
+      chatScroll.appendChild(row);
+      chatScroll.scrollTop = chatScroll.scrollHeight;
+    }
+
+    async function loadProjects() {
+      loadingProjects = true;
+      try {
+        const res = await fetch(API_BASE + "/projects");
+        const data = await res.json();
+
+        projectSelect.innerHTML = "";
+
+        if (data.error) {
+          projectSelect.innerHTML =
+            '<option value="">Error loading projects</option>';
+          projectStatus.textContent = "Error loading projects from backend.";
+          return;
+        }
+
+        const projects = data.projects || [];
+
+        if (!projects.length) {
+          projectSelect.innerHTML =
+            '<option value="">No projects found (default: General)</option>';
+          currentProject = null;
+          projectStatus.textContent =
+            "No projects in database yet. Ingest some estimates to begin.";
+          return;
+        }
+
+        for (const p of projects) {
+          const opt = document.createElement("option");
+          opt.value = p;
+          opt.textContent = p;
+          projectSelect.appendChild(opt);
+        }
+
+        currentProject = projects[0] || null;
+        projectStatus.textContent = currentProject
+          ? `Questions will use project: ${currentProject}`
+          : "No project selected.";
+      } catch (err) {
+        console.error("Error loading projects:", err);
+        projectSelect.innerHTML =
+          '<option value="">Error loading projects</option>';
+        projectStatus.textContent =
+          "Could not connect to backend. Is FastAPI running?";
+      } finally {
+        loadingProjects = false;
+      }
+    }
+
+    projectSelect.addEventListener("change", () => {
+      currentProject = projectSelect.value || null;
+      projectStatus.textContent = currentProject
+        ? `Questions will use project: ${currentProject}`
+        : "No project selected. Backend will fall back to General.";
+    });
+
+    chatForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const text = questionInput.value.trim();
+      if (!text) return;
+
+      appendMessage(text, "user");
+      questionInput.value = "";
+      questionInput.focus();
+      sendBtn.disabled = true;
+
+      try {
+        const payload = {
+          question: text,
+          project: currentProject || null,
+          k: 6,
+        };
+
+        const res = await fetch(API_BASE + "/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        const data = await res.json();
+
+        if (data.error) {
+          appendMessage(
+            "Backend error: " + (data.error || "Unknown error"),
+            "bot"
+          );
+        } else {
+          const answer = data.answer_draft || "(no answer text returned)";
+          appendMessage(answer, "bot", data.citations || []);
+        }
+      } catch (err) {
+        console.error("Ask error:", err);
+        appendMessage(
+          "Could not contact backend. Check that FastAPI is running on port 8000.",
+          "bot"
+        );
+      } finally {
+        sendBtn.disabled = false;
+      }
+    });
+
+    // Initial load
+    loadProjects();
+  </script>
+</body>
+</html>
