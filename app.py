@@ -10,7 +10,7 @@ from typing import List, Optional
 
 import pyarrow as pa
 import lancedb
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -78,6 +78,33 @@ t = open_or_create_table()
 
 # ---------- FastAPI app + CORS ----------
 app = FastAPI()
+@app.post("/slack/command")
+async def slack_command(request: Request):
+    # Slack sends form-encoded data for slash commands
+    form = await request.form()
+
+    text = form.get("text", "")
+    user_id = form.get("user_id", "")
+
+    # For now, just echo back what Slack sent so we know it's wired correctly
+    return {
+        "response_type": "ephemeral",  # only visible to the user who ran the command
+        "text": f"Stately Brain heard: `{text}` (from <@{user_id}>)"
+    }
+
+@app.post("/slack/events")
+async def slack_events(request: Request):
+    # Slack will first send a url_verification challenge when you enable Event Subscriptions
+    payload = await request.json()
+
+    # 1) Handle Slack's URL verification
+    if payload.get("type") == "url_verification":
+        challenge = payload.get("challenge")
+        return {"challenge": challenge}
+
+    # 2) Handle normal events later (mentions, etc.)
+    # For now we just acknowledge so Slack is happy
+    return {"ok": True}
 
 # ONLY ONE CORS BLOCK
 app.add_middleware(
