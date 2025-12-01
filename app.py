@@ -86,7 +86,7 @@ app = FastAPI()
 
 def _run_brain_and_reply(question: str, response_url: str, user_id: str):
     """
-    Background job:
+    Background job for Q&A:
     - Call the existing ask() logic
     - POST the answer back to Slack via response_url
     """
@@ -108,7 +108,6 @@ def _run_brain_and_reply(question: str, response_url: str, user_id: str):
         msg = f"Stately Brain error while processing your question: {e}"
 
     try:
-        # Tell Slack the final answer
         httpx.post(
             response_url,
             json={
@@ -118,7 +117,79 @@ def _run_brain_and_reply(question: str, response_url: str, user_id: str):
             timeout=30.0,
         )
     except Exception as e:
-        print("SLACK SEND ERROR:", repr(e))
+        print("SLACK SEND ERROR (Q&A):", repr(e))
+
+
+def _run_ingest_and_reply(raw_text: str, response_url: str, user_id: str):
+    """
+    Background job for ingestion:
+    - Parse project/tags from the command
+    - Call ingest() with the remaining text
+    - POST a confirmation back to Slack
+    """
+    try:
+        # Strip leading "ingest"
+        text = raw_text.strip()
+        parts = text.split()
+        if not parts or parts[0].lower() != "ingest":
+            msg = "To ingest, start your command with `ingest`."
+        else:
+            tokens = parts[1:]  # everything after 'ingest'
+            project = None
+            tags_list = []
+            body_tokens = []
+
+            for tok in tokens:
+                lower = tok.lower()
+                if lower.startswith("project="):
+                    project = tok.split("=", 1)[1]
+                elif lower.startswith("tags="):
+                    tags_raw = tok.split("=", 1)[1]
+                    tags_list = [
+                        t.strip() for t in tags_raw.split(",") if t.strip()
+                    ]
+                else:
+                    body_tokens.append(tok)
+
+            body = " ".join(body_tokens).strip()
+
+            if not body:
+                msg = (
+                    "I didn't see any note text to ingest.\n\n"
+                    "Example:\n"
+                    "`/brain ingest project=Casterline tags=allowance,plumbing "
+                    "Toilet allowance is $350...`"
+                )
+            else:
+                req = IngestReq(
+                    text=body,
+                    project=project,
+                    source=f"slack:{user_id}",
+                    tags=tags_list or None,
+                )
+                result = ingest(req)
+                if isinstance(result, dict) and result.get("ok"):
+                    proj_name = req.project or "General"
+                    msg = (
+                        f"Saved note into project \"{proj_name}\" "
+                        f"(id: {result.get('id')})."
+                    )
+                else:
+                    msg = f"Ingest error: {result}"
+    except Exception as e:
+        msg = f"Stately Brain error while ingesting: {e}"
+
+    try:
+        httpx.post(
+            response_url,
+            json={
+                "response_type": "ephemeral",
+                "text": msg,
+            },
+            timeout=30.0,
+        )
+    except Exception as e:
+        print("SLACK SEND ERROR (INGEST):", repr(e))
 
 
 @app.post("/slack/command")
@@ -126,10 +197,9 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
     """
     Handle the /brain slash command.
 
-    We must respond to Slack within ~3 seconds, so:
-    - Read the question
-    - Schedule a background task to do the heavy work
-    - Immediately return an ack message
+    Modes:
+    - `/brain <question>`          → Q&A via ask()
+    - `/brain ingest ...`          → ingest text into memory
     """
     form = await request.form()
 
@@ -140,37 +210,47 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
     if not text:
         return {
             "response_type": "ephemeral",
-            "text": "Use `/brain` followed by a question, e.g. `/brain summarize the latest client notes`.",
+            "text": (
+                "Use `/brain` followed by a question, e.g. "
+                "`/brain summarize the latest client notes`,\n"
+                "or ingest notes with `/brain ingest project=Name your note...`."
+            ),
         }
 
     if not response_url:
-        # Fallback: we can't post later, so tell the user plainly
         return {
             "response_type": "ephemeral",
-            "text": "Slack did not provide a response_url, so I can't send the full answer back.",
+            "text": (
+                "Slack did not provide a response_url, so I can't send the full "
+                "answer back."
+            ),
         }
 
-    # Schedule background processing so we don't hit Slack's timeout
-    background_tasks.add_task(_run_brain_and_reply, text, response_url, user_id)
+    # Decide mode based on first word
+    first_word = text.split()[0].lower()
+    if first_word == "ingest":
+        background_tasks.add_task(_run_ingest_and_reply, text, response_url, user_id)
+        ack_msg = "Got it, ingesting this note into Stately Brain..."
+    else:
+        background_tasks.add_task(_run_brain_and_reply, text, response_url, user_id)
+        ack_msg = f"Got it, thinking about: `{text}`"
 
-    # Immediate, lightweight response to avoid operation_timeout
+    # Immediate ack to avoid Slack operation_timeout
     return {
         "response_type": "ephemeral",
-        "text": f"Got it, thinking about: `{text}`",
+        "text": ack_msg,
     }
 
 
 @app.post("/slack/events")
 async def slack_events(request: Request):
-    # Slack will first send a url_verification challenge when you enable Event Subscriptions
     payload = await request.json()
 
-    # 1) Handle Slack's URL verification
+    # Slack URL verification
     if payload.get("type") == "url_verification":
-        challenge = payload.get("challenge")
-        return {"challenge": challenge}
+        return {"challenge": payload.get("challenge")}
 
-    # 2) Normal events (mentions, DMs, etc.) can be wired up later
+    # Normal events (mentions, etc.) can be added later
     return {"ok": True}
 
 
