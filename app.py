@@ -455,9 +455,18 @@ Here are project notes and estimate excerpts:
 
 {context}
 
-Answer the user's question as a short, direct sentence using the numbers in the text 
-(e.g. “The toilet allowance is $350.00.”). 
-If you are not sure, say you are not sure.
+Answer using ONLY the information in the context above.
+
+Rules:
+1. Never guess or estimate numbers. Only use quantities, prices, dates, and names that are explicitly written in the context.
+2. If the question is about tile quantities or square footage, list each relevant line item separately with its quantity and units exactly as shown. 
+   Do NOT add them together unless the user explicitly asks for a total.
+3. If multiple different numbers could apply, list them all and explain what each one refers to.
+4. If you are asked whether the estimate is signed, treat the presence of the client's name and a date near the end of the document as an indication that it IS signed. 
+   In that case answer like: "Yes, it appears signed by David Casterline on Jun 16, 2025."
+5. If the context does not give you enough information, say you are not sure instead of guessing.
+
+Give a short, direct answer.
 """
 
         resp = oa.responses.create(
