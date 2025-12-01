@@ -11,11 +11,12 @@ from typing import List, Optional
 
 import pyarrow as pa
 import lancedb
-from fastapi import FastAPI, UploadFile, File, Form, Request, Query
+from fastapi import FastAPI, UploadFile, File, Form, Request, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pypdf import PdfReader
 from openai import OpenAI
+import httpx
 
 # ---------- OpenAI Client ----------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -82,20 +83,59 @@ t = open_or_create_table()
 app = FastAPI()
 
 # ---------- Slack endpoints ----------
-@app.post("/slack/command")
-async def slack_command(request: Request):
-    """
-    Handle the /brain slash command from Slack.
 
-    Flow:
-    - Read the text the user typed after /brain
-    - Call the existing /ask logic in this file
-    - Return the answer back to Slack as an ephemeral message
+def _run_brain_and_reply(question: str, response_url: str, user_id: str):
+    """
+    Background job:
+    - Call the existing ask() logic
+    - POST the answer back to Slack via response_url
+    """
+    try:
+        req = AskReq(question=question, project=None, k=6)
+        result = ask(req)
+
+        if isinstance(result, dict) and "error" in result:
+            msg = f"Stately Brain error: {result.get('error')}"
+        else:
+            msg = (
+                result.get("answer_draft")
+                if isinstance(result, dict)
+                else str(result)
+            )
+        if not msg:
+            msg = "I didn't get a usable answer back from Stately Brain."
+    except Exception as e:
+        msg = f"Stately Brain error while processing your question: {e}"
+
+    try:
+        # Tell Slack the final answer
+        httpx.post(
+            response_url,
+            json={
+                "response_type": "ephemeral",
+                "text": msg,
+            },
+            timeout=30.0,
+        )
+    except Exception as e:
+        print("SLACK SEND ERROR:", repr(e))
+
+
+@app.post("/slack/command")
+async def slack_command(request: Request, background_tasks: BackgroundTasks):
+    """
+    Handle the /brain slash command.
+
+    We must respond to Slack within ~3 seconds, so:
+    - Read the question
+    - Schedule a background task to do the heavy work
+    - Immediately return an ack message
     """
     form = await request.form()
 
     text = (form.get("text") or "").strip()
     user_id = form.get("user_id") or ""
+    response_url = form.get("response_url") or ""
 
     if not text:
         return {
@@ -103,30 +143,20 @@ async def slack_command(request: Request):
             "text": "Use `/brain` followed by a question, e.g. `/brain summarize the latest client notes`.",
         }
 
-    # Reuse the existing /ask logic directly
-    try:
-        req = AskReq(question=text, project=None, k=6)
-        result = ask(req)
-    except Exception as e:
+    if not response_url:
+        # Fallback: we can't post later, so tell the user plainly
         return {
             "response_type": "ephemeral",
-            "text": f"Stately Brain error while processing your question: {e}",
+            "text": "Slack did not provide a response_url, so I can't send the full answer back.",
         }
 
-    # ask() returns {"answer_draft": ..., "citations": [...] } on success
-    if isinstance(result, dict) and "error" in result:
-        msg = f"Stately Brain error: {result.get('error')}"
-    else:
-        msg = (
-            result.get("answer_draft")
-            if isinstance(result, dict)
-            else str(result)
-        )
+    # Schedule background processing so we don't hit Slack's timeout
+    background_tasks.add_task(_run_brain_and_reply, text, response_url, user_id)
 
-    # Only visible to the user who ran the command
+    # Immediate, lightweight response to avoid operation_timeout
     return {
         "response_type": "ephemeral",
-        "text": msg or "I didn't get a usable answer back from Stately Brain.",
+        "text": f"Got it, thinking about: `{text}`",
     }
 
 
@@ -140,8 +170,7 @@ async def slack_events(request: Request):
         challenge = payload.get("challenge")
         return {"challenge": challenge}
 
-    # 2) Normal events (mentions, DMs, etc.) can be handled later
-    # For now we just acknowledge so Slack is happy
+    # 2) Normal events (mentions, DMs, etc.) can be wired up later
     return {"ok": True}
 
 
