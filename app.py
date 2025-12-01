@@ -24,7 +24,7 @@ if not OPENAI_API_KEY:
     raise RuntimeError("Set OPENAI_API_KEY in your .env file")
 
 oa = OpenAI(api_key=OPENAI_API_KEY)
-
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 
 def embed(texts: List[str]) -> List[List[float]]:
     """Return 1536-dim embeddings for a list of texts."""
@@ -85,11 +85,7 @@ app = FastAPI()
 # ---------- Slack endpoints ----------
 
 def _run_brain_and_reply(question: str, response_url: str, user_id: str):
-    """
-    Background job for Q&A:
-    - Call the existing ask() logic
-    - POST the answer back to Slack via response_url
-    """
+    """Background job for Q&A via /brain."""
     try:
         req = AskReq(question=question, project=None, k=6)
         result = ask(req)
@@ -110,10 +106,7 @@ def _run_brain_and_reply(question: str, response_url: str, user_id: str):
     try:
         httpx.post(
             response_url,
-            json={
-                "response_type": "ephemeral",
-                "text": msg,
-            },
+            json={"response_type": "ephemeral", "text": msg},
             timeout=30.0,
         )
     except Exception as e:
@@ -121,20 +114,14 @@ def _run_brain_and_reply(question: str, response_url: str, user_id: str):
 
 
 def _run_ingest_and_reply(raw_text: str, response_url: str, user_id: str):
-    """
-    Background job for ingestion:
-    - Parse project/tags from the command
-    - Call ingest() with the remaining text
-    - POST a confirmation back to Slack
-    """
+    """Background job for ingestion via text: `/brain ingest ...`."""
     try:
-        # Strip leading "ingest"
         text = raw_text.strip()
         parts = text.split()
         if not parts or parts[0].lower() != "ingest":
             msg = "To ingest, start your command with `ingest`."
         else:
-            tokens = parts[1:]  # everything after 'ingest'
+            tokens = parts[1:]
             project = None
             tags_list = []
             body_tokens = []
@@ -182,14 +169,116 @@ def _run_ingest_and_reply(raw_text: str, response_url: str, user_id: str):
     try:
         httpx.post(
             response_url,
-            json={
-                "response_type": "ephemeral",
-                "text": msg,
-            },
+            json={"response_type": "ephemeral", "text": msg},
             timeout=30.0,
         )
     except Exception as e:
         print("SLACK SEND ERROR (INGEST):", repr(e))
+
+
+def _ingest_slack_file(event: dict):
+    """
+    Background job for file uploads:
+    - Download the file from Slack
+    - Extract text with _read_text_from_upload
+    - Ingest chunks into LanceDB
+    - Post a confirmation message to the channel
+    """
+    if not SLACK_BOT_TOKEN:
+        print("SLACK FILE INGEST SKIPPED: SLACK_BOT_TOKEN not set")
+        return
+
+    try:
+        file_id = event.get("file_id") or event.get("file", {}).get("id")
+        channel_id = event.get("channel_id") or event.get("channel")
+        user_id = event.get("user_id") or event.get("user")
+
+        if not file_id or not channel_id:
+            print("SLACK FILE INGEST: missing file_id or channel_id:", event)
+            return
+
+        headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
+
+        # 1) Look up file info
+        info_resp = httpx.get(
+            "https://slack.com/api/files.info",
+            params={"file": file_id},
+            headers=headers,
+            timeout=30.0,
+        )
+        info = info_resp.json()
+        if not info.get("ok"):
+            print("files.info error:", info)
+            return
+
+        file_obj = info.get("file", {})
+        download_url = file_obj.get("url_private_download")
+        filename = file_obj.get("name") or file_obj.get("title") or "slack_file"
+        mimetype = file_obj.get("mimetype") or ""
+
+        if not download_url:
+            print("No url_private_download for file:", file_id)
+            return
+
+        # 2) Download file bytes
+        file_resp = httpx.get(download_url, headers=headers, timeout=60.0)
+        data = file_resp.content
+
+        # 3) Only handle text-like docs for now
+        lower_name = filename.lower()
+        if not (
+            lower_name.endswith(".pdf")
+            or lower_name.endswith(".txt")
+            or lower_name.endswith(".md")
+            or "text" in mimetype
+        ):
+            print("Skipping non-text file:", filename, mimetype)
+            return
+
+        text = _read_text_from_upload(filename, data)
+        if not text:
+            print("No text extracted from file:", filename)
+            return
+
+        # Use channel id as project label
+        proj_name = f"slack:{channel_id}"
+
+        saved = []
+        for part in chunk_text(text):
+            if not part.strip():
+                continue
+
+            vec = embed([part])[0]
+            row = {
+                "id": str(uuid.uuid4()),
+                "text": part,
+                "project": proj_name,
+                "source": filename,
+                "tags": ["slack-upload"],
+                "vector": vec,
+            }
+            t.add([row])
+            saved.append({"id": row["id"], "source": row["source"]})
+
+        # 4) Post confirmation message back to the channel
+        try:
+            httpx.post(
+                "https://slack.com/api/chat.postMessage",
+                headers=headers,
+                json={
+                    "channel": channel_id,
+                    "text": (
+                        f"Ingested *{filename}* into project `{proj_name}` "
+                        f"({len(saved)} chunks)."
+                    ),
+                },
+                timeout=30.0,
+            )
+        except Exception as e:
+            print("SLACK CONFIRM SEND ERROR:", repr(e))
+
+    except Exception as e:
+        print("SLACK FILE INGEST ERROR:", repr(e))
 
 
 @app.post("/slack/command")
@@ -226,7 +315,6 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
             ),
         }
 
-    # Decide mode based on first word
     first_word = text.split()[0].lower()
     if first_word == "ingest":
         background_tasks.add_task(_run_ingest_and_reply, text, response_url, user_id)
@@ -235,22 +323,26 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
         background_tasks.add_task(_run_brain_and_reply, text, response_url, user_id)
         ack_msg = f"Got it, thinking about: `{text}`"
 
-    # Immediate ack to avoid Slack operation_timeout
-    return {
-        "response_type": "ephemeral",
-        "text": ack_msg,
-    }
+    return {"response_type": "ephemeral", "text": ack_msg}
 
 
 @app.post("/slack/events")
-async def slack_events(request: Request):
+async def slack_events(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
 
     # Slack URL verification
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge")}
 
-    # Normal events (mentions, etc.) can be added later
+    event = payload.get("event") or {}
+    etype = event.get("type")
+
+    # File uploads
+    if etype == "file_shared":
+        background_tasks.add_task(_ingest_slack_file, event)
+        return {"ok": True}
+
+    # Other events (mentions, etc.) can be handled later
     return {"ok": True}
 
 
