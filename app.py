@@ -26,6 +26,7 @@ if not OPENAI_API_KEY:
 oa = OpenAI(api_key=OPENAI_API_KEY)
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 
+
 def embed(texts: List[str]) -> List[List[float]]:
     """Return 1536-dim embeddings for a list of texts."""
     resp = oa.embeddings.create(model="text-embedding-3-small", input=texts)
@@ -83,6 +84,7 @@ t = open_or_create_table()
 app = FastAPI()
 
 # ---------- Slack endpoints ----------
+
 
 def _run_brain_and_reply(question: str, response_url: str, user_id: str):
     """Background job for Q&A via /brain."""
@@ -336,9 +338,16 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
 
     event = payload.get("event") or {}
     etype = event.get("type")
+    print("SLACK EVENT TYPE:", etype, "keys:", list(event.keys()))
 
-    # File uploads
-    if etype == "file_shared":
+    # Be aggressive: try to ingest any event that appears to involve a file.
+    # _ingest_slack_file will safely bail if file_id/channel_id are missing.
+    if (
+        etype == "file_shared"
+        or "file" in event
+        or "files" in event
+        or event.get("subtype") == "file_share"
+    ):
         background_tasks.add_task(_ingest_slack_file, event)
         return {"ok": True}
 
@@ -521,7 +530,7 @@ def chunk_text(text: str, max_chars: int = 6000) -> List[str]:
     text = text or ""
     if not text:
         return []
-    return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
+    return [text[i: i + max_chars] for i in range(0, len(text), max_chars)]
 
 
 # ---------- helper: read text from a single uploaded file ----------
