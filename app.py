@@ -331,48 +331,52 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
 @app.post("/slack/events")
 async def slack_events(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
-    print("SLACK EVENT PAYLOAD:", payload)
 
-    # 1) Slack URL verification handshake
+    # 1) Slack URL verification
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge")}
 
     event = payload.get("event") or {}
     etype = event.get("type")
     subtype = event.get("subtype")
-    print("SLACK EVENT TYPE:", etype, "SUBTYPE:", subtype)
 
-    # 2) Classic file_shared event
+    # Minimal logging so we can see what Slack is actually sending
+    try:
+        print(
+            "SLACK EVENT TYPE:",
+            etype,
+            "SUBTYPE:",
+            subtype,
+            "KEYS:",
+            list(event.keys()),
+        )
+    except Exception as e:
+        print("SLACK EVENT LOG ERROR:", repr(e))
+
+    # 2) Handle pure file_shared events (from the file_shared subscription)
     if etype == "file_shared":
-        print("SLACK EVENT: file_shared")
         background_tasks.add_task(_ingest_slack_file, event)
         return {"ok": True}
 
-    # 3) Message with attached file(s), e.g. type=message, subtype=file_share
+    # 3) Handle message events that include a file (subtype=file_share)
     if etype == "message" and subtype == "file_share":
-        print("SLACK EVENT: message file_share")
         files = event.get("files") or []
-        channel = event.get("channel")
-        user = event.get("user")
+        if files:
+            file_obj = files[0]
+            file_id = file_obj.get("id")
+            channel_id = event.get("channel")
+            user_id = event.get("user") or event.get("user_id")
 
-        for f in files:
-            # Normalize into a file_shared-like payload for _ingest_slack_file
-            fake_event = {
-                "type": "file_shared",
-                "file_id": f.get("id"),
-                "file": f,
-                "channel_id": channel,
-                "channel": channel,
-                "user_id": user,
-                "user": user,
+            ingest_event = {
+                "file_id": file_id,
+                "channel_id": channel_id,
+                "user_id": user_id,
             }
-            background_tasks.add_task(_ingest_slack_file, fake_event)
-
+            background_tasks.add_task(_ingest_slack_file, ingest_event)
         return {"ok": True}
 
-    # 4) Everything else – we just acknowledge
+    # 4) Everything else (mentions etc.) – just ack for now
     return {"ok": True}
-
 
 # ---------- CORS ----------
 app.add_middleware(
