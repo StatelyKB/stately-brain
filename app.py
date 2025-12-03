@@ -331,27 +331,46 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
 @app.post("/slack/events")
 async def slack_events(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
+    print("SLACK EVENT PAYLOAD:", payload)
 
-    # Slack URL verification
+    # 1) Slack URL verification handshake
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge")}
 
     event = payload.get("event") or {}
     etype = event.get("type")
-    print("SLACK EVENT TYPE:", etype, "keys:", list(event.keys()))
+    subtype = event.get("subtype")
+    print("SLACK EVENT TYPE:", etype, "SUBTYPE:", subtype)
 
-    # Be aggressive: try to ingest any event that appears to involve a file.
-    # _ingest_slack_file will safely bail if file_id/channel_id are missing.
-    if (
-        etype == "file_shared"
-        or "file" in event
-        or "files" in event
-        or event.get("subtype") == "file_share"
-    ):
+    # 2) Classic file_shared event
+    if etype == "file_shared":
+        print("SLACK EVENT: file_shared")
         background_tasks.add_task(_ingest_slack_file, event)
         return {"ok": True}
 
-    # Other events (mentions, etc.) can be handled later
+    # 3) Message with attached file(s), e.g. type=message, subtype=file_share
+    if etype == "message" and subtype == "file_share":
+        print("SLACK EVENT: message file_share")
+        files = event.get("files") or []
+        channel = event.get("channel")
+        user = event.get("user")
+
+        for f in files:
+            # Normalize into a file_shared-like payload for _ingest_slack_file
+            fake_event = {
+                "type": "file_shared",
+                "file_id": f.get("id"),
+                "file": f,
+                "channel_id": channel,
+                "channel": channel,
+                "user_id": user,
+                "user": user,
+            }
+            background_tasks.add_task(_ingest_slack_file, fake_event)
+
+        return {"ok": True}
+
+    # 4) Everything else – we just acknowledge
     return {"ok": True}
 
 
